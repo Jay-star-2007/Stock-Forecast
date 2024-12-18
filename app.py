@@ -155,26 +155,62 @@ def index():
 def get_available_stocks():
     """获取可用的股票列表"""
     try:
-        close_df, open_df, _ = load_stock_data()
+        close_df, open_df, spx_const = load_stock_data()
+        
+        # 优先考虑的股票列表
+        priority_stocks = ['S1134', 'S846', 'S1083']
         
         # 获取所有可用的股票代码（排除Date列）
-        available_stocks = sorted(set(close_df.columns) - {'Date'})
+        all_stocks = sorted(set(close_df.columns) - {'Date'})
         
-        if not available_stocks:
+        if not all_stocks:
             return jsonify({'error': '没有找到可用的股票数据'}), 404
             
-        # 进一步验证每个股票的数据
+        # 放宽验证条件，只检查基本的数据有效性
         valid_stocks = []
-        for stock in available_stocks:
-            # 检查数据长度
-            if len(close_df[stock]) >= 60:  # 确保有足够的数据进行预测
-                # 检查数据质量
-                if not (close_df[stock].isnull().any() or open_df[stock].isnull().any()):
-                    valid_stocks.append(stock)
-                else:
-                    print(f'警告: 股票 {stock} 包含无效数据，已被过滤')
         
-        print(f'有效股票数量: {len(valid_stocks)}')
+        # 首先检查优先股票
+        for stock in priority_stocks:
+            if stock in all_stocks:
+                close_data = close_df[stock].values
+                open_data = open_df[stock].values
+                
+                if (len(close_data) >= 60 and 
+                    np.isnan(close_data).sum() / len(close_data) < 0.05 and
+                    np.isnan(open_data).sum() / len(open_data) < 0.05 and
+                    np.min(close_data[~np.isnan(close_data)]) > 0 and
+                    np.min(open_data[~np.isnan(open_data)]) > 0):
+                    
+                    valid_stocks.append(stock)
+                    print(f'优先股票 {stock} 已添加')
+        
+        # 然后检查其他股票
+        for stock in all_stocks:
+            if stock not in valid_stocks:  # 避免重复添加
+                close_data = close_df[stock].values
+                open_data = open_df[stock].values
+                
+                if (len(close_data) >= 60 and 
+                    np.isnan(close_data).sum() / len(close_data) < 0.05 and
+                    np.isnan(open_data).sum() / len(open_data) < 0.05 and
+                    np.min(close_data[~np.isnan(close_data)]) > 0 and
+                    np.min(open_data[~np.isnan(open_data)]) > 0):
+                    
+                    valid_stocks.append(stock)
+                    
+                    # 打印股票信息
+                    if len(valid_stocks) <= 10:
+                        print(f'股票 {stock} 信息:')
+                        print(f'  数据长度: {len(close_data)}')
+                        print(f'  收盘价范围: {np.min(close_data):.2f} - {np.max(close_data):.2f}')
+                        print(f'  开盘价范围: {np.min(open_data):.2f} - {np.max(open_data):.2f}')
+                    
+                    # 如果已经有足够的股票，就停止添加
+                    if len(valid_stocks) >= 30:
+                        break
+        
+        print(f'找到 {len(valid_stocks)} 支有效股票')
+        print('有效股票列表:', valid_stocks)
         return jsonify(valid_stocks)
         
     except Exception as e:
