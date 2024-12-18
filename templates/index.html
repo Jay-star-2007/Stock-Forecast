@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>股票价格预测</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <style>
+        #container {
+            width: 1000px;
+            margin: 0 auto;
+        }
+        #chart {
+            width: 100%;
+            height: 800px;
+            margin: 20px 0;
+        }
+        .title {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .controls {
+            text-align: center;
+            margin: 20px 0;
+        }
+        select {
+            padding: 5px;
+            font-size: 16px;
+            min-width: 200px;
+        }
+        .performance-info {
+            margin: 20px auto;
+            width: 80%;
+            display: flex;
+            justify-content: space-around;
+        }
+        .performance-card {
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            width: 45%;
+        }
+        .performance-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .performance-item {
+            margin: 5px 0;
+        }
+        .positive {
+            color: #ff3333;
+        }
+        .negative {
+            color: #33ff33;
+        }
+        .error-message {
+            color: #ff0000;
+            padding: 10px;
+            background-color: #ffe6e6;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        select:disabled {
+            background-color: #f5f5f5;
+            cursor: not-allowed;
+        }
+        .loading {
+            opacity: 0.6;
+            cursor: wait;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1 class="title">股票价格预测分析</h1>
+        <div class="controls">
+            <select id="stockSelect">
+                <option value="">请选择股票代码...</option>
+            </select>
+        </div>
+        <div id="chart"></div>
+        <div class="performance-info">
+            <div class="performance-card">
+                <div class="performance-title">LSTM模型表现</div>
+                <div id="lstm-performance"></div>
+            </div>
+            <div class="performance-card">
+                <div class="performance-title">随机森林模型表现</div>
+                <div id="rf-performance"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const chart = echarts.init(document.getElementById('chart'));
+        const stockSelect = document.getElementById('stockSelect');
+        
+        // 格式化价格显示
+        function formatPrice(price) {
+            return price.toFixed(3);  // 股票价格通常显示3位小数
+        }
+        
+        // 格式化涨跌率显示
+        function formatChangeRate(rate) {
+            const sign = rate >= 0 ? '+' : '';
+            return `${sign}${rate.toFixed(2)}%`;
+        }
+        
+        // 获取涨跌率的显示颜色
+        function getChangeColor(rate) {
+            return rate >= 0 ? '#ff3333' : '#33ff33';  // 红涨绿跌
+        }
+        
+        // 加载可用的股票列表
+        fetch('/api/stocks')
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(err => {
+                        throw new Error(err.error || '获取股票列表失败');
+                    });
+                }
+                return response.json();
+            })
+            .then(stocks => {
+                if (!Array.isArray(stocks) || stocks.length === 0) {
+                    throw new Error('没有可用的股票数据');
+                }
+                
+                // 清空现有选项（除了默认选项）
+                while (stockSelect.options.length > 1) {
+                    stockSelect.remove(1);
+                }
+                
+                // 添加股票选项
+                stocks.forEach(stock => {
+                    const option = document.createElement('option');
+                    option.value = stock;
+                    option.textContent = stock;
+                    stockSelect.appendChild(option);
+                });
+                
+                console.log(`已加载 ${stocks.length} 支股票`);
+            })
+            .catch(error => {
+                console.error('加载股票列表失败:', error);
+                stockSelect.innerHTML = `<option value="">加载失败: ${error.message}</option>`;
+                stockSelect.disabled = true;
+            });
+        
+        // 当选择股票时更新图表
+        stockSelect.addEventListener('change', function() {
+            if (!this.value) return;
+            
+            // 清空现有图表
+            chart.clear();
+            // 清空性能指标显示
+            document.getElementById('lstm-performance').innerHTML = '加载中...';
+            document.getElementById('rf-performance').innerHTML = '加载中...';
+            
+            fetch(`/api/predict/${this.value}`)
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().then(err => {
+                            throw new Error(err.error || '请求失败');
+                        });
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    
+                    // 验证数据完整性
+                    if (!data.dates || !data.actual || !data.lstm_predicted || !data.rf_predicted) {
+                        throw new Error('返回数据不完整');
+                    }
+                    
+                    // 更新图表和性能指标
+                    updateChart(data);
+                    updatePerformanceDisplay(data.performance.lstm, 'lstm-performance');
+                    updatePerformanceDisplay(data.performance.rf, 'rf-performance');
+                })
+                .catch(error => {
+                    console.error('加载数据失败:', error);
+                    // 显示错误信息
+                    document.getElementById('lstm-performance').innerHTML = 
+                        `<div class="error-message">加载失败: ${error.message}</div>`;
+                    document.getElementById('rf-performance').innerHTML = 
+                        `<div class="error-message">加载失败: ${error.message}</div>`;
+                    // 清空图表
+                    chart.clear();
+                });
+        });
+        
+        // 将图表更新逻辑抽取为单独的函数
+        function updateChart(data) {
+            const option = {
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        const date = params[0].axisValue;
+                        let result = `日期：${date}<br/>`;
+                        
+                        // 找到当前日期对应的涨跌率
+                        const index = data.dates.indexOf(date);
+                        const changeRate = data.change_rate[index];
+                        
+                        params.forEach(param => {
+                            if (param.seriesName === '涨跌幅') {
+                                result += `${param.seriesName}：<span style="color:${getChangeColor(param.value)}">${formatChangeRate(param.value)}</span><br/>`;
+                            } else {
+                                result += `${param.seriesName}：${formatPrice(param.value)}<br/>`;
+                            }
+                        });
+                        return result;
+                    }
+                },
+                legend: {
+                    data: ['收盘价', '开盘价', 'LSTM预测', 'RF预测', '涨跌幅']
+                },
+                grid: [{
+                    left: '10%',
+                    right: '10%',
+                    top: '5%',
+                    height: '55%'
+                }, {
+                    left: '10%',
+                    right: '10%',
+                    top: '70%',
+                    height: '20%'
+                }],
+                xAxis: [{
+                    type: 'category',
+                    data: data.dates,
+                    axisLabel: {
+                        rotate: 45
+                    },
+                    gridIndex: 0
+                }, {
+                    type: 'category',
+                    data: data.dates,
+                    gridIndex: 1,
+                    axisLabel: {
+                        rotate: 45
+                    }
+                }],
+                yAxis: [{
+                    type: 'value',
+                    name: '价格',
+                    gridIndex: 0
+                }, {
+                    type: 'value',
+                    name: '涨跌幅(%)',
+                    gridIndex: 1
+                }],
+                series: [{
+                    name: '收盘价',
+                    type: 'line',
+                    data: data.actual,
+                    xAxisIndex: 0,
+                    yAxisIndex: 0
+                }, {
+                    name: '开盘价',
+                    type: 'line',
+                    data: data.open,
+                    xAxisIndex: 0,
+                    yAxisIndex: 0
+                }, {
+                    name: 'LSTM预测',
+                    type: 'line',
+                    data: data.lstm_predicted,
+                    xAxisIndex: 0,
+                    yAxisIndex: 0,
+                    lineStyle: {
+                        type: 'dashed'
+                    }
+                }, {
+                    name: 'RF预测',
+                    type: 'line',
+                    data: data.rf_predicted,
+                    xAxisIndex: 0,
+                    yAxisIndex: 0,
+                    lineStyle: {
+                        type: 'dashed'
+                    }
+                }, {
+                    name: '涨跌幅',
+                    type: 'bar',
+                    data: data.change_rate,
+                    xAxisIndex: 1,
+                    yAxisIndex: 1,
+                    itemStyle: {
+                        color: function(params) {
+                            return getChangeColor(params.value);
+                        }
+                    }
+                }]
+            };
+            chart.setOption(option);
+        }
+        
+        function updatePerformanceDisplay(performance, elementId) {
+            const element = document.getElementById(elementId);
+            const {total_return, annual_return, sharpe_ratio, max_drawdown, trade_count, final_capital} = performance;
+            
+            element.innerHTML = `
+                <div class="performance-item">总收益率: <span class="${total_return >= 0 ? 'positive' : 'negative'}">${total_return.toFixed(2)}%</span></div>
+                <div class="performance-item">年化收益率: <span class="${annual_return >= 0 ? 'positive' : 'negative'}">${annual_return.toFixed(2)}%</span></div>
+                <div class="performance-item">夏普比率: ${sharpe_ratio.toFixed(2)}</div>
+                <div class="performance-item">最大回撤: ${max_drawdown.toFixed(2)}%</div>
+                <div class="performance-item">交易次数: ${trade_count}</div>
+                <div class="performance-item">最终资金: ¥${final_capital.toFixed(2)}</div>
+            `;
+        }
+    </script>
+</body>
+</html> 
